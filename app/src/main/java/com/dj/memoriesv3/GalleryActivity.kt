@@ -3,41 +3,35 @@ package com.dj.memoriesv3
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.view.View
-import android.widget.ProgressBar
-import android.widget.TextView
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
-import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.appbar.MaterialToolbar
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.Response
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModelProvider
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 
-class GalleryActivity : AppCompatActivity() {
+class GalleryActivity : ComponentActivity() {
 
-    private lateinit var recyclerView: RecyclerView
-    private lateinit var progressBar: ProgressBar
-    private lateinit var emptyText: TextView
-    private lateinit var toolbar: MaterialToolbar
-    private lateinit var adapter: GalleryAdapter
     private lateinit var githubToken: String
     private lateinit var organization: String
-
-    private val service: GitHubService by lazy {
-        Retrofit.Builder()
-            .baseUrl("https://api.github.com/")
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(GitHubService::class.java)
-    }
+    private lateinit var viewModel: GalleryViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_gallery)
 
         // Get Repo Name from Intent
         val repoName = intent.getStringExtra("REPO_NAME") ?: return finish()
@@ -52,129 +46,88 @@ class GalleryActivity : AppCompatActivity() {
             return
         }
 
-        setupUI(repoName)
-        fetchThumbnails(repoName)
-    }
+        viewModel = ViewModelProvider(this)[GalleryViewModel::class.java]
 
-    private fun setupUI(repoName: String) {
-        toolbar = findViewById(R.id.galleryToolbar)
-        toolbar.title = repoName
-        toolbar.setNavigationOnClickListener { finish() }
+        viewModel.loadImages(organization, repoName, githubToken)
 
-        progressBar = findViewById(R.id.progressBarGallery)
-        emptyText = findViewById(R.id.textEmptyState)
-        recyclerView = findViewById(R.id.recyclerViewGallery)
-
-        // 3 Columns Grid
-        recyclerView.layoutManager = GridLayoutManager(this, 3)
-        adapter = GalleryAdapter(mutableListOf()) { file ->
-            val intent = Intent(this, PhotoViewerActivity::class.java)
-            intent.putExtra("REPO_NAME", repoName)
-            intent.putExtra("FILE_NAME", file.name)
-            intent.putExtra("FILE_PATH", file.path)
-            intent.putExtra("FILE_URL", file.url)
-            intent.putExtra("ORIGINAL_PATH", file.originalPath)
-            startActivity(intent)
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                GalleryScreen(repoName)
+            }
         }
-        recyclerView.adapter = adapter
     }
 
-    private fun fetchThumbnails(repoName: String) {
-        progressBar.visibility = View.VISIBLE
-        toolbar.subtitle = "Locating thumbnails..."
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Composable
+    fun GalleryScreen(repoName: String) {
+        val imagesState by viewModel.imagesState.collectAsState()
+        val statusMessage by viewModel.statusMessage.collectAsState()
 
-        // Step 1: Get Root Tree (Non-recursive) to find 'thumbnails' folder
-        // We pass 0 for recursive to avoid fetching the whole repo
-        service.getRepoTree(organization, repoName, "HEAD", "Bearer $githubToken", 0)
-            .enqueue(object : Callback<GitHubTreeResponse> {
-                override fun onResponse(call: Call<GitHubTreeResponse>, response: Response<GitHubTreeResponse>) {
-                    if (response.isSuccessful) {
-                        val rootItems = response.body()?.tree ?: emptyList()
-                        val thumbDir = rootItems.find { it.path.equals("thumbnails", ignoreCase = true) && it.type == "tree" }
-                        
-                        // Map lowercase filename to actual filename for root files to handle casing (e.g. .jpg vs .JPG)
-                        val rootFilesMap = rootItems
-                            .filter { it.type == "blob" }
-                            .associate { it.path.lowercase() to it.path }
-
-                        if (thumbDir != null) {
-                            fetchThumbnailsTree(repoName, thumbDir.sha, thumbDir.path, rootFilesMap)
-                        } else {
-                            showError("No 'thumbnails' folder found.")
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(repoName)
+                            if (statusMessage.isNotEmpty()) {
+                                Text(statusMessage, style = MaterialTheme.typography.bodySmall)
+                            }
                         }
-                    } else {
-                        showError("Error: ${response.code()}")
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { finish() }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
                     }
-                }
-
-                override fun onFailure(call: Call<GitHubTreeResponse>, t: Throwable) {
-                    showError("Failure: ${t.message}")
-                }
-            })
-    }
-
-    private fun fetchThumbnailsTree(repoName: String, sha: String, folderPath: String, rootFilesMap: Map<String, String>) {
-        toolbar.subtitle = "Fetching image list..."
-        // Step 2: Get Tree of the thumbnails folder
-        service.getRepoTree(organization, repoName, sha, "Bearer $githubToken", 1)
-            .enqueue(object : Callback<GitHubTreeResponse> {
-                override fun onResponse(call: Call<GitHubTreeResponse>, response: Response<GitHubTreeResponse>) {
-                    if (response.isSuccessful) {
-                        val treeItems = response.body()?.tree ?: emptyList()
-                        processImages(treeItems, repoName, folderPath, rootFilesMap)
-                    } else {
-                        showError("Error: ${response.code()}")
-                    }
-                }
-
-                override fun onFailure(call: Call<GitHubTreeResponse>, t: Throwable) {
-                    showError("Failure: ${t.message}")
-                }
-            })
-    }
-
-    private fun processImages(treeItems: List<GitHubTreeItem>, repoName: String, folderPath: String, rootFilesMap: Map<String, String>) {
-        toolbar.subtitle = "Processing ${treeItems.size} files..."
-        Thread {
-            val images = treeItems.filter { item ->
-                item.type == "blob" &&
-                (item.path.endsWith(".jpg", true) || 
-                 item.path.endsWith(".png", true) || 
-                 item.path.endsWith(".jpeg", true))
-            }.map { item ->
-                val fullPath = "$folderPath/${item.path}"
-                val simpleName = item.path.substringAfterLast('/')
-                // Try to find the exact original path from root files map
-                val originalPath = rootFilesMap[simpleName.lowercase()]
-                GitHubFile(
-                    name = simpleName,
-                    path = fullPath,
-                    download_url = "https://raw.githubusercontent.com/$organization/$repoName/HEAD/$fullPath",
-                    url = item.url,
-                    originalPath = originalPath
                 )
             }
-
-            runOnUiThread {
-                progressBar.visibility = View.GONE
-                toolbar.subtitle = "${images.size} images"
-                if (images.isEmpty()) {
-                    emptyText.visibility = View.VISIBLE
-                    emptyText.text = "No images found in thumbnails/"
-                } else {
-                    emptyText.visibility = View.GONE
-                    adapter.updateData(images)
+        ) { padding ->
+            Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+                when (val state = imagesState) {
+                    is UiState.Loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
+                    is UiState.Error -> Text("Error: ${state.message}", Modifier.align(Alignment.Center))
+                    is UiState.Success -> {
+                        if (state.data.isEmpty()) {
+                            Text("No images found in thumbnails/", Modifier.align(Alignment.Center))
+                        } else {
+                            LazyVerticalGrid(columns = GridCells.Fixed(3)) {
+                                items(state.data) { file ->
+                                    GalleryItem(file, repoName)
+                                }
+                            }
+                        }
+                    }
                 }
             }
-        }.start()
+        }
     }
 
-    private fun showError(message: String) {
-        runOnUiThread {
-            progressBar.visibility = View.GONE
-            toolbar.subtitle = "Error"
-            Toast.makeText(this@GalleryActivity, message, Toast.LENGTH_SHORT).show()
-        }
+    @Composable
+    fun GalleryItem(file: GitHubFile, repoName: String) {
+        val context = LocalContext.current
+        val imageUrl = file.getImageUrl()
+        
+        AsyncImage(
+            model = ImageRequest.Builder(context)
+                .data(imageUrl)
+                .addHeader("Authorization", "Bearer $githubToken")
+                .crossfade(true)
+                .build(),
+            contentDescription = file.name,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .aspectRatio(1f)
+                .padding(2.dp)
+                .clickable {
+                    val intent = Intent(context, PhotoViewerActivity::class.java)
+                    intent.putExtra("REPO_NAME", repoName)
+                    intent.putExtra("FILE_NAME", file.name)
+                    intent.putExtra("FILE_PATH", file.path)
+                    intent.putExtra("FILE_URL", file.url)
+                    intent.putExtra("ORIGINAL_PATH", file.originalPath)
+                    context.startActivity(intent)
+                }
+        )
     }
 }
 

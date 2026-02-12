@@ -3,48 +3,77 @@ package com.dj.memoriesv3
 import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
-import androidx.appcompat.app.AppCompatActivity
-import com.dj.memoriesv3.databinding.SettingsActivityBinding
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 
-class SettingsActivity : AppCompatActivity() {
+class SettingsActivity : ComponentActivity() {
 
-    private lateinit var binding: SettingsActivityBinding
-
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = SettingsActivityBinding.inflate(layoutInflater)
-        setContentView(binding.root)
-
-        setSupportActionBar(binding.idMaterialToolbar)
-        supportActionBar?.setDisplayHomeAsUpEnabled(true)
-        supportActionBar?.title = "Settings"
 
         val sharedPreferences = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-        
-        // Load existing values
-        binding.edtOrgName.setText(sharedPreferences.getString(Constants.KEY_ORG_NAME, ""))
-        binding.idEdtToken.setText(sharedPreferences.getString(Constants.KEY_GITHUB_TOKEN, ""))
 
-        binding.idBtnSaveSettings.setOnClickListener {
-            val orgName = binding.edtOrgName.text.toString().trim()
-            val token = binding.idEdtToken.text.toString().trim()
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                var orgName by remember { mutableStateOf(sharedPreferences.getString(Constants.KEY_ORG_NAME, "") ?: "") }
+                var token by remember { mutableStateOf(sharedPreferences.getString(Constants.KEY_GITHUB_TOKEN, "") ?: "") }
 
-            if (orgName.isEmpty() || token.isEmpty()) {
-                Toast.makeText(this, "Please enter both Org Name and Token", Toast.LENGTH_SHORT).show()
-            } else {
-                sharedPreferences.edit().apply {
-                    putString(Constants.KEY_ORG_NAME, orgName)
-                    putString(Constants.KEY_GITHUB_TOKEN, token)
-                    apply()
+                Scaffold(
+                    topBar = {
+                        TopAppBar(
+                            title = { Text("Settings") },
+                            navigationIcon = {
+                                IconButton(onClick = { finish() }) {
+                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                                }
+                            }
+                        )
+                    }
+                ) { padding ->
+                    Column(modifier = Modifier.padding(padding).padding(16.dp)) {
+                        OutlinedTextField(
+                            value = orgName,
+                            onValueChange = { orgName = it },
+                            label = { Text("Organization Name") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = token,
+                            onValueChange = { token = it },
+                            label = { Text("GitHub Token") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Button(
+                            onClick = {
+                                if (orgName.isEmpty() || token.isEmpty()) {
+                                    Toast.makeText(this@SettingsActivity, "Please enter both Org Name and Token", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    sharedPreferences.edit().apply {
+                                        putString(Constants.KEY_ORG_NAME, orgName)
+                                        putString(Constants.KEY_GITHUB_TOKEN, token)
+                                        apply()
+                                    }
+                                    Toast.makeText(this@SettingsActivity, "Settings saved", Toast.LENGTH_SHORT).show()
+                                    finish()
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Save Settings")
+                        }
+                    }
                 }
-                Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show()
-                finish() // Go back to MainActivity
             }
         }
-    }
-
-    override fun onSupportNavigateUp(): Boolean {
-        onBackPressedDispatcher.onBackPressed()
-        return true
     }
 }
