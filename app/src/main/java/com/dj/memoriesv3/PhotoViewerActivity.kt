@@ -16,7 +16,7 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -24,26 +24,37 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.RotateLeft
 import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.ZoomIn
+import androidx.compose.material.icons.outlined.ZoomOut
+import androidx.compose.material.icons.outlined.RestartAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.dj.memoriesv3.ui.theme.MemoriesTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -54,6 +65,9 @@ import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 class PhotoViewerActivity : ComponentActivity() {
 
@@ -110,6 +124,8 @@ class PhotoViewerActivity : ComponentActivity() {
         }
     }
 
+    // ─────────────────────── Main Screen ───────────────────────
+
     @OptIn(ExperimentalMaterial3Api::class)
     @Composable
     fun PhotoViewerScreen(fileName: String) {
@@ -118,36 +134,35 @@ class PhotoViewerActivity : ComponentActivity() {
         val details by downloadDetails.collectAsState()
         val speed by downloadSpeed.collectAsState()
         var controlsVisible by remember { mutableStateOf(true) }
+        var showInfoDialog by remember { mutableStateOf(false) }
 
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(Color.Black)
-                .systemBarsPadding()
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onTap = { controlsVisible = !controlsVisible }
-                    )
-                },
+                .systemBarsPadding(),
         ) {
-            // ── Image ──
+            // ── Image with Gestures ──
             when (val s = state) {
                 is ViewerState.Loading -> {
-                    // Download Progress
                     DownloadProgressOverlay(progress, details, speed)
                 }
                 is ViewerState.Success -> {
-                    androidx.compose.foundation.Image(
-                        bitmap = s.bitmap.asImageBitmap(),
+                    ZoomableImage(
+                        bitmap = s.bitmap,
                         contentDescription = fileName,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
+                        onSingleTap = { controlsVisible = !controlsVisible },
+                        onLongPress = { showInfoDialog = true },
+                        onSwipeDown = { finish() },
                     )
                 }
                 is ViewerState.Error -> {
                     ErrorOverlay(s.message)
                 }
             }
+
+            // ── Zoom level indicator (shows briefly when zooming) ──
+            // (handled inside ZoomableImage)
 
             // ── Top bar with gradient scrim ──
             AnimatedVisibility(
@@ -232,11 +247,359 @@ class PhotoViewerActivity : ComponentActivity() {
                             label = "Share",
                             onClick = { shareImage() },
                         )
+                        // Info Button
+                        ActionChip(
+                            icon = Icons.Outlined.Info,
+                            label = "Info",
+                            onClick = { showInfoDialog = true },
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Image Info Dialog ──
+        if (showInfoDialog) {
+            ImageInfoDialog(
+                bitmap = currentBitmap,
+                fileName = fileName,
+                fileSize = currentImageFile?.length(),
+                onDismiss = { showInfoDialog = false },
+            )
+        }
+    }
+
+    // ─────────────────────── Zoomable Image ───────────────────────
+
+    @Composable
+    fun ZoomableImage(
+        bitmap: Bitmap,
+        contentDescription: String,
+        onSingleTap: () -> Unit,
+        onLongPress: () -> Unit,
+        onSwipeDown: () -> Unit,
+    ) {
+        // Zoom & pan state
+        var scale by remember { mutableFloatStateOf(1f) }
+        var offsetX by remember { mutableFloatStateOf(0f) }
+        var offsetY by remember { mutableFloatStateOf(0f) }
+        var rotation by remember { mutableFloatStateOf(0f) }
+
+        // Animated zoom (for double-tap)
+        val animatedScale = remember { Animatable(1f) }
+        val animatedOffsetX = remember { Animatable(0f) }
+        val animatedOffsetY = remember { Animatable(0f) }
+
+        var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+        // Zoom indicator
+        var showZoomIndicator by remember { mutableStateOf(false) }
+        var zoomLevel by remember { mutableFloatStateOf(1f) }
+
+        // Swipe-down-to-dismiss tracking
+        var dismissOffset by remember { mutableFloatStateOf(0f) }
+        val dismissAlpha by remember { derivedStateOf { 1f - (abs(dismissOffset) / 800f).coerceIn(0f, 0.7f) } }
+
+        val coroutineScope = rememberCoroutineScope()
+
+        val minScale = 0.5f
+        val maxScale = 8f
+        val doubleTapScale = 3f
+
+        // Sync animated values back to mutable state
+        LaunchedEffect(animatedScale.value) { scale = animatedScale.value }
+        LaunchedEffect(animatedOffsetX.value) { offsetX = animatedOffsetX.value }
+        LaunchedEffect(animatedOffsetY.value) { offsetY = animatedOffsetY.value }
+
+        // Auto-hide zoom indicator
+        LaunchedEffect(showZoomIndicator) {
+            if (showZoomIndicator) {
+                delay(1200)
+                showZoomIndicator = false
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { containerSize = it }
+                .pointerInput(Unit) {
+                    detectTapGestures(
+                        onTap = { onSingleTap() },
+                        onDoubleTap = { tapOffset ->
+                            coroutineScope.launch {
+                                if (scale > 1.1f) {
+                                    // Reset to 1x
+                                    launch { animatedScale.animateTo(1f, tween(350, easing = FastOutSlowInEasing)) }
+                                    launch { animatedOffsetX.animateTo(0f, tween(350, easing = FastOutSlowInEasing)) }
+                                    launch { animatedOffsetY.animateTo(0f, tween(350, easing = FastOutSlowInEasing)) }
+                                    rotation = 0f
+                                    zoomLevel = 1f
+                                } else {
+                                    // Zoom to doubleTapScale, centered on tap point
+                                    val newScale = doubleTapScale
+                                    val centerX = containerSize.width / 2f
+                                    val centerY = containerSize.height / 2f
+                                    val focusX = tapOffset.x - centerX
+                                    val focusY = tapOffset.y - centerY
+                                    val newOffsetX = -focusX * (newScale - 1f)
+                                    val newOffsetY = -focusY * (newScale - 1f)
+
+                                    launch { animatedScale.animateTo(newScale, tween(350, easing = FastOutSlowInEasing)) }
+                                    launch { animatedOffsetX.animateTo(newOffsetX, tween(350, easing = FastOutSlowInEasing)) }
+                                    launch { animatedOffsetY.animateTo(newOffsetY, tween(350, easing = FastOutSlowInEasing)) }
+                                    zoomLevel = newScale
+                                }
+                                showZoomIndicator = true
+                            }
+                        },
+                        onLongPress = { onLongPress() },
+                    )
+                }
+                .pointerInput(Unit) {
+                    detectTransformGestures { _, pan, zoom, gestureRotation ->
+                        val newScale = (scale * zoom).coerceIn(minScale, maxScale)
+                        
+                        if (newScale <= 1f && scale <= 1f) {
+                            // If at 1x or below, track vertical pan for swipe-down-to-dismiss
+                            dismissOffset += pan.y
+                            if (abs(dismissOffset) > 300f) {
+                                onSwipeDown()
+                                return@detectTransformGestures
+                            }
+                        } else {
+                            dismissOffset = 0f
+                        }
+
+                        // Calculate max pan bounds
+                        val maxX = max(0f, (containerSize.width * (newScale - 1f)) / 2f)
+                        val maxY = max(0f, (containerSize.height * (newScale - 1f)) / 2f)
+
+                        val newOffsetX = (offsetX + pan.x * newScale / scale).coerceIn(-maxX, maxX)
+                        val newOffsetY = (offsetY + pan.y * newScale / scale).coerceIn(-maxY, maxY)
+
+                        scale = newScale
+                        offsetX = newOffsetX
+                        offsetY = newOffsetY
+                        rotation += gestureRotation
+                        zoomLevel = newScale
+
+                        // Update animatable values to current state (no animation)
+                        coroutineScope.launch {
+                            animatedScale.snapTo(newScale)
+                            animatedOffsetX.snapTo(newOffsetX)
+                            animatedOffsetY.snapTo(newOffsetY)
+                        }
+
+                        showZoomIndicator = true
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            // The actual image
+            androidx.compose.foundation.Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = contentDescription,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offsetX + (if (scale <= 1f) 0f else 0f)
+                        translationY = offsetY + dismissOffset
+                        rotationZ = rotation
+                        alpha = dismissAlpha
+                    },
+            )
+
+            // ── Zoom Level Indicator ──
+            AnimatedVisibility(
+                visible = showZoomIndicator,
+                enter = fadeIn(tween(150)),
+                exit = fadeOut(tween(400)),
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 72.dp, end = 16.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.Black.copy(alpha = 0.6f),
+                    contentColor = Color.White,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            if (zoomLevel >= 1f) Icons.Outlined.ZoomIn else Icons.Outlined.ZoomOut,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = Color(0xFFB8C3FF),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            text = "${String.format(Locale.getDefault(), "%.1f", zoomLevel)}×",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
+
+            // ── Quick zoom controls (show with controls) ──
+            // Floating zoom buttons bottom-right when zoomed
+            if (scale > 1.05f) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    // Zoom In
+                    SmallFloatingActionButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                val newScale = (scale * 1.5f).coerceAtMost(maxScale)
+                                launch { animatedScale.animateTo(newScale, tween(250)) }
+                                zoomLevel = newScale
+                                showZoomIndicator = true
+                            }
+                        },
+                        containerColor = Color.Black.copy(alpha = 0.5f),
+                        contentColor = Color.White,
+                        shape = CircleShape,
+                    ) {
+                        Icon(Icons.Outlined.ZoomIn, "Zoom In", modifier = Modifier.size(20.dp))
+                    }
+                    // Zoom Out
+                    SmallFloatingActionButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                val newScale = (scale / 1.5f).coerceAtLeast(1f)
+                                val maxX = max(0f, (containerSize.width * (newScale - 1f)) / 2f)
+                                val maxY = max(0f, (containerSize.height * (newScale - 1f)) / 2f)
+                                launch { animatedScale.animateTo(newScale, tween(250)) }
+                                launch { animatedOffsetX.animateTo(offsetX.coerceIn(-maxX, maxX), tween(250)) }
+                                launch { animatedOffsetY.animateTo(offsetY.coerceIn(-maxY, maxY), tween(250)) }
+                                zoomLevel = newScale
+                                showZoomIndicator = true
+                            }
+                        },
+                        containerColor = Color.Black.copy(alpha = 0.5f),
+                        contentColor = Color.White,
+                        shape = CircleShape,
+                    ) {
+                        Icon(Icons.Outlined.ZoomOut, "Zoom Out", modifier = Modifier.size(20.dp))
+                    }
+                    // Reset
+                    SmallFloatingActionButton(
+                        onClick = {
+                            coroutineScope.launch {
+                                launch { animatedScale.animateTo(1f, tween(300)) }
+                                launch { animatedOffsetX.animateTo(0f, tween(300)) }
+                                launch { animatedOffsetY.animateTo(0f, tween(300)) }
+                                rotation = 0f
+                                zoomLevel = 1f
+                                showZoomIndicator = true
+                            }
+                        },
+                        containerColor = Color.Black.copy(alpha = 0.5f),
+                        contentColor = Color.White,
+                        shape = CircleShape,
+                    ) {
+                        Icon(Icons.Outlined.RestartAlt, "Reset", modifier = Modifier.size(20.dp))
+                    }
+                    // Reset Rotation (only if rotated)
+                    if (abs(rotation) > 5f) {
+                        SmallFloatingActionButton(
+                            onClick = {
+                                rotation = 0f
+                            },
+                            containerColor = Color.Black.copy(alpha = 0.5f),
+                            contentColor = Color.White,
+                            shape = CircleShape,
+                        ) {
+                            Icon(Icons.Outlined.RotateLeft, "Reset Rotation", modifier = Modifier.size(20.dp))
+                        }
                     }
                 }
             }
         }
     }
+
+    // ─────────────────────── Image Info Dialog ───────────────────────
+
+    @Composable
+    fun ImageInfoDialog(
+        bitmap: Bitmap?,
+        fileName: String,
+        fileSize: Long?,
+        onDismiss: () -> Unit,
+    ) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            containerColor = Color(0xFF1E1E2E),
+            titleContentColor = Color.White,
+            textContentColor = Color.White.copy(alpha = 0.8f),
+            title = {
+                Text(
+                    "Image Details",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    InfoRow("File Name", fileName)
+                    bitmap?.let {
+                        InfoRow("Resolution", "${it.width} × ${it.height} px")
+                        InfoRow("Megapixels", String.format(Locale.getDefault(), "%.1f MP", (it.width.toLong() * it.height) / 1_000_000.0))
+                        InfoRow("Color Config", it.config?.name ?: "Unknown")
+                    }
+                    fileSize?.let {
+                        InfoRow("File Size", formatFileSize(it))
+                    }
+                    bitmap?.let {
+                        val ratio = it.width.toFloat() / it.height
+                        InfoRow("Aspect Ratio", String.format(Locale.getDefault(), "%.2f : 1", ratio))
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = onDismiss) {
+                    Text("Close", color = Color(0xFFB8C3FF))
+                }
+            },
+        )
+    }
+
+    @Composable
+    fun InfoRow(label: String, value: String) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.White.copy(alpha = 0.06f))
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.5f),
+            )
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                color = Color.White,
+            )
+        }
+    }
+
+    // ─────────────────────── Action Chip ───────────────────────
 
     @Composable
     fun ActionChip(
@@ -275,6 +638,8 @@ class PhotoViewerActivity : ComponentActivity() {
             }
         }
     }
+
+    // ─────────────────────── Download Progress ───────────────────────
 
     @Composable
     fun DownloadProgressOverlay(progress: Float, details: String, speed: String) {
@@ -324,6 +689,8 @@ class PhotoViewerActivity : ComponentActivity() {
         }
     }
 
+    // ─────────────────────── Error Overlay ───────────────────────
+
     @Composable
     fun ErrorOverlay(message: String) {
         Box(
@@ -365,6 +732,8 @@ class PhotoViewerActivity : ComponentActivity() {
             }
         }
     }
+
+    // ─────────────────────── Download Logic ───────────────────────
 
     private fun downloadImage(urlString: String, token: String) {
         lifecycleScope.launch(Dispatchers.IO) {
@@ -446,6 +815,8 @@ class PhotoViewerActivity : ComponentActivity() {
         val pre = "KMGTPE"[exp - 1]
         return String.format(Locale.getDefault(), "%.1f %sB", bytes / Math.pow(1024.0, exp.toDouble()), pre)
     }
+
+    // ─────────────────────── Save / Share ───────────────────────
 
     private fun saveImageToGallery() {
         val bitmap = currentBitmap ?: return
