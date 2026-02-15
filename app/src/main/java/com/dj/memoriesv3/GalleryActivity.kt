@@ -387,12 +387,12 @@ class GalleryActivity : ComponentActivity() {
                         if (isSelectionMode) {
                             viewModel.toggleSelection(file.path)
                         } else {
+                            val currentFiles = (viewModel.imagesState.value as? UiState.Success)?.data ?: emptyList()
+                            val currentIndex = currentFiles.indexOf(file).coerceAtLeast(0)
                             val intent = Intent(context, PhotoViewerActivity::class.java)
                             intent.putExtra("REPO_NAME", repoName)
-                            intent.putExtra("FILE_NAME", file.name)
-                            intent.putExtra("FILE_PATH", file.path)
-                            intent.putExtra("FILE_URL", file.url)
-                            intent.putExtra("ORIGINAL_PATH", file.originalPath)
+                            intent.putExtra("CURRENT_INDEX", currentIndex)
+                            intent.putExtra("PHOTO_LIST_JSON", com.google.gson.Gson().toJson(currentFiles))
                             context.startActivity(intent)
                         }
                     },

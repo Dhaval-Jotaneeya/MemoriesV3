@@ -62,3 +62,6 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
+
+// Workaround: AGP 9.0 doesn't register 'testClasses' task that Android Studio expects
+tasks.register("testClasses")

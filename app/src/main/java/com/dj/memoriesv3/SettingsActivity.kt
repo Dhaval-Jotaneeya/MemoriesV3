@@ -225,6 +225,276 @@ class SettingsActivity : ComponentActivity() {
 
                         Spacer(Modifier.height(32.dp))
 
+                        // ── Cache Management Section ──
+                        SectionHeader(
+                            title = "Cache Management",
+                            icon = Icons.Outlined.FolderDelete,
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // Calculate cache sizes
+                        var thumbnailCacheSize by remember { mutableLongStateOf(0L) }
+                        var hdCacheSize by remember { mutableLongStateOf(0L) }
+                        var showClearThumbnailDialog by remember { mutableStateOf(false) }
+                        var showClearHdDialog by remember { mutableStateOf(false) }
+                        var showClearAllDialog by remember { mutableStateOf(false) }
+
+                        // Recalculate sizes
+                        fun recalculateSizes() {
+                            val thumbDir = java.io.File(cacheDir, "thumbnails_cache")
+                            thumbnailCacheSize = if (thumbDir.exists()) thumbDir.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
+                            val hdDir = java.io.File(filesDir, "hd_cache")
+                            hdCacheSize = if (hdDir.exists()) hdDir.walkTopDown().filter { it.isFile }.sumOf { it.length() } else 0L
+                        }
+
+                        LaunchedEffect(Unit) { recalculateSizes() }
+
+                        fun formatCacheSize(bytes: Long): String {
+                            if (bytes < 1024) return "$bytes B"
+                            val kb = bytes / 1024.0
+                            if (kb < 1024) return String.format("%.1f KB", kb)
+                            val mb = kb / 1024.0
+                            if (mb < 1024) return String.format("%.1f MB", mb)
+                            val gb = mb / 1024.0
+                            return String.format("%.2f GB", gb)
+                        }
+
+                        // Thumbnail Cache Card
+                        SettingsCard {
+                            Column(modifier = Modifier.padding(20.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Outlined.Image,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(20.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Text(
+                                                "Thumbnail Cache",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
+                                        }
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            "Gallery preview images • ${formatCacheSize(thumbnailCacheSize)}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(start = 30.dp),
+                                        )
+                                    }
+                                    FilledTonalButton(
+                                        onClick = { showClearThumbnailDialog = true },
+                                        enabled = thumbnailCacheSize > 0,
+                                        shape = RoundedCornerShape(12.dp),
+                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                                    ) {
+                                        Text("Clear", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // HD Photo Cache Card
+                        SettingsCard {
+                            Column(modifier = Modifier.padding(20.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                Icons.Outlined.HighQuality,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(20.dp),
+                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                            Spacer(Modifier.width(10.dp))
+                                            Text(
+                                                "HD Photo Cache",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Medium,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
+                                        }
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            "Full resolution viewed photos • ${formatCacheSize(hdCacheSize)}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(start = 30.dp),
+                                        )
+                                    }
+                                    FilledTonalButton(
+                                        onClick = { showClearHdDialog = true },
+                                        enabled = hdCacheSize > 0,
+                                        shape = RoundedCornerShape(12.dp),
+                                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                                    ) {
+                                        Text("Clear", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(12.dp))
+
+                        // Clear All Cache Button
+                        OutlinedButton(
+                            onClick = { showClearAllDialog = true },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            enabled = (thumbnailCacheSize + hdCacheSize) > 0,
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if ((thumbnailCacheSize + hdCacheSize) > 0)
+                                    MaterialTheme.colorScheme.error.copy(alpha = 0.5f)
+                                else
+                                    MaterialTheme.colorScheme.outlineVariant,
+                            ),
+                        ) {
+                            Icon(
+                                Icons.Outlined.DeleteSweep,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Clear All Cache (${formatCacheSize(thumbnailCacheSize + hdCacheSize)})",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+
+                        // ── Confirmation Dialogs ──
+
+                        if (showClearThumbnailDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showClearThumbnailDialog = false },
+                                shape = RoundedCornerShape(24.dp),
+                                icon = {
+                                    Icon(
+                                        Icons.Outlined.Image,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                },
+                                title = { Text("Clear Thumbnail Cache?") },
+                                text = {
+                                    Text("This will remove ${formatCacheSize(thumbnailCacheSize)} of cached gallery thumbnails. They will be re-downloaded when you open an album.")
+                                },
+                                confirmButton = {
+                                    Button(
+                                        onClick = {
+                                            val freed = thumbnailCacheSize
+                                            val thumbDir = java.io.File(cacheDir, "thumbnails_cache")
+                                            if (thumbDir.exists()) thumbDir.deleteRecursively()
+                                            showClearThumbnailDialog = false
+                                            recalculateSizes()
+                                            Toast.makeText(this@SettingsActivity, "Freed ${formatCacheSize(freed)}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) { Text("Clear") }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showClearThumbnailDialog = false }) { Text("Cancel") }
+                                },
+                            )
+                        }
+
+                        if (showClearHdDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showClearHdDialog = false },
+                                shape = RoundedCornerShape(24.dp),
+                                icon = {
+                                    Icon(
+                                        Icons.Outlined.HighQuality,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                },
+                                title = { Text("Clear HD Photo Cache?") },
+                                text = {
+                                    Text("This will remove ${formatCacheSize(hdCacheSize)} of cached full-resolution photos. They will be re-downloaded when you view them again.")
+                                },
+                                confirmButton = {
+                                    Button(
+                                        onClick = {
+                                            val freed = hdCacheSize
+                                            val hdDir = java.io.File(filesDir, "hd_cache")
+                                            if (hdDir.exists()) hdDir.deleteRecursively()
+                                            showClearHdDialog = false
+                                            recalculateSizes()
+                                            Toast.makeText(this@SettingsActivity, "Freed ${formatCacheSize(freed)}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) { Text("Clear") }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showClearHdDialog = false }) { Text("Cancel") }
+                                },
+                            )
+                        }
+
+                        if (showClearAllDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showClearAllDialog = false },
+                                shape = RoundedCornerShape(24.dp),
+                                icon = {
+                                    Icon(
+                                        Icons.Outlined.DeleteSweep,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                    )
+                                },
+                                title = { Text("Clear All Cache?") },
+                                text = {
+                                    Text("This will remove all cached data (${formatCacheSize(thumbnailCacheSize + hdCacheSize)} total):\n\n• Thumbnail Cache: ${formatCacheSize(thumbnailCacheSize)}\n• HD Photo Cache: ${formatCacheSize(hdCacheSize)}\n\nAll images will need to be re-downloaded.")
+                                },
+                                confirmButton = {
+                                    Button(
+                                        onClick = {
+                                            val freed = thumbnailCacheSize + hdCacheSize
+                                            val thumbDir = java.io.File(cacheDir, "thumbnails_cache")
+                                            if (thumbDir.exists()) thumbDir.deleteRecursively()
+                                            val hdDir = java.io.File(filesDir, "hd_cache")
+                                            if (hdDir.exists()) hdDir.deleteRecursively()
+                                            showClearAllDialog = false
+                                            recalculateSizes()
+                                            Toast.makeText(this@SettingsActivity, "Freed ${formatCacheSize(freed)}", Toast.LENGTH_SHORT).show()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.error,
+                                        ),
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) { Text("Clear All") }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showClearAllDialog = false }) { Text("Cancel") }
+                                },
+                            )
+                        }
+
+                        Spacer(Modifier.height(32.dp))
+
                         // ── About Section ──
                         SectionHeader(
                             title = "About",
