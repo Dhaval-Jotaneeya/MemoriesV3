@@ -8,14 +8,19 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import android.util.Base64
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicInteger
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.URL
@@ -94,8 +99,13 @@ class GalleryViewModel : ViewModel() {
                     .associate { it.path.lowercase() to it.path }
 
                 _statusMessage.value = "Fetching image list..."
-                val thumbTree = GitHubRepository.getRepoTree(organization, repoName, thumbDir.sha, token, 1)
+                // Use recursive=0 to avoid timeouts on large trees. Thumbnails folder is flat.
+                val thumbTree = GitHubRepository.getRepoTree(organization, repoName, thumbDir.sha, token, 0)
                 
+                if (thumbTree.truncated) {
+                    _statusMessage.value = "Warning: File list truncated by GitHub."
+                }
+
                 _statusMessage.value = "Processing files..."
                 val images = withContext(Dispatchers.Default) {
                     thumbTree.tree.filter { item ->
@@ -379,137 +389,211 @@ class GalleryViewModel : ViewModel() {
     }
 
     /**
-     * Upload multiple images to the repository.
-     * For each image:
-     *  1. Read the original image bytes
-     *  2. Upload the original to the repo root
-     *  3. Create a compressed thumbnail (max ~10KB)
-     *  4. Upload the thumbnail to thumbnails/ folder
+     * Upload multiple images using the Git Data API with parallel blob uploads
+     * and size-based dynamic batching.
+     *
+     * Strategy:
+     * - Up to 3 blobs upload in PARALLEL via Semaphore (3x faster than sequential)
+     * - Each blob is retried 3x with exponential backoff
+     * - A commit is created when cumulative blob size reaches ~100MB
+     * - Adapts to image sizes: small photos → big batches, large photos → small batches
+     * - HEAD SHA is re-fetched before each commit to avoid stale-ref errors
+     * - At most ~3 images in memory at a time (bounded by semaphore)
      */
+    companion object {
+        /** Max cumulative blob size per commit (~100MB). */
+        private const val BATCH_SIZE_LIMIT_BYTES = 100L * 1024 * 1024
+        /** Max concurrent blob uploads. 3 is safe for GitHub's secondary rate limit. */
+        private const val PARALLEL_UPLOADS = 3
+    }
+
+    /**
+     * Data class to hold the result of a single file's parallel blob upload.
+     */
+    private data class BlobUploadResult(
+        val originalTreeItem: JSONObject,
+        val thumbnailTreeItem: JSONObject,
+        val totalBytes: Long
+    )
+
     fun uploadImages(context: Context, imageUris: List<Uri>) {
         if (currentOrganization.isEmpty() || currentRepoName.isEmpty() || currentToken.isEmpty()) return
 
         viewModelScope.launch {
             val totalFiles = imageUris.size
             val errors = mutableListOf<String>()
+            val uploadSemaphore = Semaphore(PARALLEL_UPLOADS)
 
             _uploadProgress.value = UploadProgress(
                 isUploading = true,
                 totalFiles = totalFiles,
                 completedFiles = 0,
-                currentStep = "Starting upload...",
+                currentStep = "Preparing $totalFiles photos...",
                 overallProgress = 0f
             )
 
-            for ((index, uri) in imageUris.withIndex()) {
-                val fileName = getFileName(context, uri) ?: "image_${System.currentTimeMillis()}_$index.jpg"
-                val safeFileName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            // Resolve branch once (handles main vs master)
+            val actualBranch: String
+            try {
+                val (_, branch) = withContext(Dispatchers.IO) {
+                    GitHubRepository.resolveDefaultBranch(currentOrganization, currentRepoName, currentToken)
+                }
+                actualBranch = branch
+            } catch (e: Exception) {
+                _uploadProgress.value = _uploadProgress.value.copy(
+                    isUploading = false,
+                    isComplete = true,
+                    currentStep = "Failed to connect to repository: ${e.message}",
+                    overallProgress = 0f,
+                    errors = listOf("Could not resolve branch: ${e.message}")
+                )
+                return@launch
+            }
+
+            // ── Pre-read file sizes for smart batching (lightweight, no image bytes loaded) ──
+            data class FileEntry(val uri: Uri, val index: Int, val safeFileName: String, val sizeBytes: Long)
+
+            val fileEntries = imageUris.mapIndexedNotNull { index, uri ->
+                try {
+                    val fileName = getFileName(context, uri) ?: "image_${System.currentTimeMillis()}_$index.jpg"
+                    val safeFileName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    val size = context.contentResolver.openInputStream(uri)?.use { it.available().toLong() } ?: 0L
+                    FileEntry(uri, index, safeFileName, size)
+                } catch (e: Exception) {
+                    errors.add("Cannot read file #${index + 1}: ${e.message}")
+                    null
+                }
+            }
+
+            // ── Partition into size-based batches ──
+            val batches = mutableListOf<List<FileEntry>>()
+            var currentBatch = mutableListOf<FileEntry>()
+            var currentBatchSize = 0L
+
+            for (entry in fileEntries) {
+                // If adding this file would exceed the limit and batch isn't empty, flush
+                if (currentBatch.isNotEmpty() && currentBatchSize + entry.sizeBytes > BATCH_SIZE_LIMIT_BYTES) {
+                    batches.add(currentBatch)
+                    currentBatch = mutableListOf()
+                    currentBatchSize = 0L
+                }
+                currentBatch.add(entry)
+                currentBatchSize += entry.sizeBytes
+            }
+            if (currentBatch.isNotEmpty()) batches.add(currentBatch)
+
+            val totalBatches = batches.size
+            val completedCount = AtomicInteger(0)
+            var totalBytesUploaded = 0L
+
+            // ── Process each batch ──
+            for ((batchIndex, batch) in batches.withIndex()) {
+                val batchNumber = batchIndex + 1
 
                 try {
-                    // Step 1: Read original image bytes
                     _uploadProgress.value = _uploadProgress.value.copy(
-                        currentFileName = safeFileName,
-                        currentStep = "Reading image...",
-                        overallProgress = (index.toFloat() / totalFiles)
+                        currentStep = "Uploading batch $batchNumber/$totalBatches (${batch.size} files)..."
                     )
 
-                    val originalBytes = withContext(Dispatchers.IO) {
-                        context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                    } ?: throw Exception("Cannot read file: $safeFileName")
-
-                    // Step 2: Upload original to repo root
-                    _uploadProgress.value = _uploadProgress.value.copy(
-                        currentStep = "Uploading original (${formatSize(originalBytes.size.toLong())})...",
-                        overallProgress = (index.toFloat() + 0.2f) / totalFiles
-                    )
-
-                    val originalBase64 = withContext(Dispatchers.Default) {
-                        Base64.encodeToString(originalBytes, Base64.NO_WRAP)
+                    // Launch parallel blob uploads, gated by semaphore
+                    val deferredResults = batch.map { entry ->
+                        async(Dispatchers.IO) {
+                            uploadSemaphore.withPermit {
+                                uploadSingleFileBlobs(context, entry.uri, entry.safeFileName)
+                            }.also {
+                                // Update progress from any thread
+                                val done = completedCount.incrementAndGet()
+                                _uploadProgress.value = _uploadProgress.value.copy(
+                                    currentFileName = entry.safeFileName,
+                                    completedFiles = done,
+                                    currentStep = "Uploading $done/$totalFiles" +
+                                            if (totalBatches > 1) " (batch $batchNumber/$totalBatches)" else "...",
+                                    overallProgress = done.toFloat() / totalFiles
+                                )
+                            }
+                        }
                     }
 
-                    val uploadOriginalSuccess = withContext(Dispatchers.IO) {
-                        GitHubRepository.uploadFile(
-                            owner = currentOrganization,
-                            repo = currentRepoName,
-                            filePath = safeFileName,
-                            token = currentToken,
-                            base64Content = originalBase64,
-                            commitMessage = "Add $safeFileName"
-                        )
+                    // Await all blob uploads in this batch
+                    val results = deferredResults.awaitAll()
+
+                    // Collect tree items from successful uploads
+                    val treeItems = mutableListOf<JSONObject>()
+                    var batchBytes = 0L
+
+                    for ((i, result) in results.withIndex()) {
+                        if (result != null) {
+                            treeItems.add(result.originalTreeItem)
+                            treeItems.add(result.thumbnailTreeItem)
+                            batchBytes += result.totalBytes
+                        } else {
+                            errors.add("${batch[i].safeFileName}: blob upload failed")
+                        }
                     }
 
-                    if (!uploadOriginalSuccess) {
-                        errors.add("$safeFileName: Failed to upload original")
+                    totalBytesUploaded += batchBytes
+
+                    // ── Commit this batch ──
+                    if (treeItems.isNotEmpty()) {
                         _uploadProgress.value = _uploadProgress.value.copy(
-                            completedFiles = index + 1,
-                            overallProgress = ((index + 1).toFloat() / totalFiles),
-                            errors = errors.toList()
+                            currentStep = "Committing batch $batchNumber/$totalBatches (${formatSize(batchBytes)})..."
                         )
-                        continue
+
+                        // Fresh HEAD SHA for each commit
+                        val headSha = GitHubRepository.retryWithBackoff(maxRetries = 2) {
+                            GitHubRepository.getBranchSha(
+                                currentOrganization, currentRepoName, currentToken, actualBranch
+                            )
+                        }
+
+                        val baseTreeSha = GitHubRepository.retryWithBackoff(maxRetries = 2) {
+                            GitHubRepository.getBaseTreeSha(
+                                currentOrganization, currentRepoName, currentToken, headSha
+                            )
+                        }
+
+                        val newTreeSha = GitHubRepository.retryWithBackoff(maxRetries = 2) {
+                            GitHubRepository.createTree(
+                                currentOrganization, currentRepoName, currentToken,
+                                baseTreeSha, treeItems
+                            )
+                        }
+
+                        val filesInBatch = treeItems.size / 2
+                        val commitMsg = "Upload $filesInBatch photos (${formatSize(batchBytes)})"
+
+                        val newCommitSha = GitHubRepository.retryWithBackoff(maxRetries = 2) {
+                            GitHubRepository.createCommitObj(
+                                currentOrganization, currentRepoName, currentToken,
+                                commitMsg, newTreeSha, headSha
+                            )
+                        }
+
+                        GitHubRepository.retryWithBackoff(maxRetries = 2) {
+                            GitHubRepository.updateRef(
+                                currentOrganization, currentRepoName, currentToken,
+                                actualBranch, newCommitSha
+                            )
+                        }
                     }
-
-                    // Step 3: Create compressed thumbnail (max ~10KB)
-                    _uploadProgress.value = _uploadProgress.value.copy(
-                        currentStep = "Creating thumbnail...",
-                        overallProgress = (index.toFloat() + 0.5f) / totalFiles
-                    )
-
-                    val thumbnailBytes = withContext(Dispatchers.Default) {
-                        createThumbnail(originalBytes, maxSizeKb = 10)
-                    }
-
-                    // Step 4: Upload thumbnail to thumbnails/ folder
-                    _uploadProgress.value = _uploadProgress.value.copy(
-                        currentStep = "Uploading thumbnail (${formatSize(thumbnailBytes.size.toLong())})...",
-                        overallProgress = (index.toFloat() + 0.75f) / totalFiles
-                    )
-
-                    val thumbnailBase64 = withContext(Dispatchers.Default) {
-                        Base64.encodeToString(thumbnailBytes, Base64.NO_WRAP)
-                    }
-
-                    // Use .jpg extension for thumbnails since we compress as JPEG
-                    val thumbFileName = if (safeFileName.endsWith(".png", true) || safeFileName.endsWith(".webp", true)) {
-                        safeFileName.substringBeforeLast('.') + ".jpg"
-                    } else {
-                        safeFileName
-                    }
-
-                    val uploadThumbSuccess = withContext(Dispatchers.IO) {
-                        GitHubRepository.uploadFile(
-                            owner = currentOrganization,
-                            repo = currentRepoName,
-                            filePath = "thumbnails/$thumbFileName",
-                            token = currentToken,
-                            base64Content = thumbnailBase64,
-                            commitMessage = "Add thumbnail for $safeFileName"
-                        )
-                    }
-
-                    if (!uploadThumbSuccess) {
-                        errors.add("$safeFileName: Failed to upload thumbnail")
-                    }
-
-                    _uploadProgress.value = _uploadProgress.value.copy(
-                        completedFiles = index + 1,
-                        overallProgress = ((index + 1).toFloat() / totalFiles),
-                        errors = errors.toList()
-                    )
 
                 } catch (e: Exception) {
-                    errors.add("$safeFileName: ${e.message}")
-                    _uploadProgress.value = _uploadProgress.value.copy(
-                        completedFiles = index + 1,
-                        overallProgress = ((index + 1).toFloat() / totalFiles),
-                        errors = errors.toList()
-                    )
+                    errors.add("Batch $batchNumber failed: ${e.message}")
+                    // Count remaining files in this batch as processed
+                    val remaining = batch.size - (completedCount.get() - batches.take(batchIndex).sumOf { it.size })
+                    completedCount.addAndGet(remaining.coerceAtLeast(0))
                 }
             }
 
             _uploadProgress.value = _uploadProgress.value.copy(
                 isUploading = false,
                 isComplete = true,
-                currentStep = if (errors.isEmpty()) "All uploads complete!" else "Upload finished with ${errors.size} error(s)",
+                completedFiles = totalFiles,
+                currentStep = if (errors.isEmpty()) {
+                    "All $totalFiles photos uploaded! (${formatSize(totalBytesUploaded)}, $totalBatches commit${if (totalBatches != 1) "s" else ""})"
+                } else {
+                    "Upload finished with ${errors.size} error(s)"
+                },
                 overallProgress = 1f,
                 errors = errors.toList()
             )
@@ -518,6 +602,88 @@ class GalleryViewModel : ViewModel() {
             if (currentOrganization.isNotEmpty() && currentRepoName.isNotEmpty() && currentToken.isNotEmpty()) {
                 loadImages(currentOrganization, currentRepoName, currentToken)
             }
+        }
+    }
+
+    /**
+     * Upload a single file's original + thumbnail blobs to GitHub.
+     * Returns BlobUploadResult on success, null on failure.
+     * This is called from parallel coroutines — reads bytes, uploads, and frees memory.
+     */
+    private suspend fun uploadSingleFileBlobs(
+        context: Context,
+        uri: Uri,
+        safeFileName: String
+    ): BlobUploadResult? {
+        return try {
+            // A) Read original bytes
+            val originalBytes = withContext(Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            } ?: throw Exception("Cannot read file: $safeFileName")
+
+            val fileSize = originalBytes.size.toLong()
+
+            // B) Upload original blob with retry
+            val originalBase64 = withContext(Dispatchers.Default) {
+                android.util.Base64.encodeToString(originalBytes, android.util.Base64.NO_WRAP)
+            }
+
+            val originalBlobSha = GitHubRepository.retryWithBackoff(maxRetries = 3) {
+                GitHubRepository.createBlob(
+                    currentOrganization, currentRepoName, currentToken, originalBase64
+                )
+            }
+            // originalBase64 out of scope → GC
+
+            // C) Create thumbnail + upload blob
+            val thumbnailBytes = withContext(Dispatchers.Default) {
+                createThumbnail(originalBytes, maxSizeKb = 10)
+            }
+            // originalBytes can now be GC'd
+
+            val thumbFileName = if (safeFileName.endsWith(".png", true) || safeFileName.endsWith(".webp", true)) {
+                safeFileName.substringBeforeLast('.') + ".jpg"
+            } else {
+                safeFileName
+            }
+
+            val thumbnailBase64 = withContext(Dispatchers.Default) {
+                android.util.Base64.encodeToString(thumbnailBytes, android.util.Base64.NO_WRAP)
+            }
+
+            val thumbBlobSha = GitHubRepository.retryWithBackoff(maxRetries = 3) {
+                GitHubRepository.createBlob(
+                    currentOrganization, currentRepoName, currentToken, thumbnailBase64
+                )
+            }
+
+            BlobUploadResult(
+                originalTreeItem = JSONObject().apply {
+                    put("path", safeFileName)
+                    put("mode", "100644")
+                    put("type", "blob")
+                    put("sha", originalBlobSha)
+                },
+                thumbnailTreeItem = JSONObject().apply {
+                    put("path", "thumbnails/$thumbFileName")
+                    put("mode", "100644")
+                    put("type", "blob")
+                    put("sha", thumbBlobSha)
+                },
+                totalBytes = fileSize + thumbnailBytes.size
+            )
+        } catch (e: Exception) {
+            null // Caller will record the error
+        }
+    }
+
+    /** Formats byte count into a human-readable string like "12.5 MB". */
+    private fun formatSize(bytes: Long): String {
+        return when {
+            bytes < 1024 -> "$bytes B"
+            bytes < 1024 * 1024 -> "%.1f KB".format(bytes / 1024.0)
+            bytes < 1024 * 1024 * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+            else -> "%.2f GB".format(bytes / (1024.0 * 1024 * 1024))
         }
     }
 
@@ -622,13 +788,5 @@ class GalleryViewModel : ViewModel() {
             name = uri.lastPathSegment
         }
         return name
-    }
-
-    private fun formatSize(bytes: Long): String {
-        if (bytes < 1024) return "$bytes B"
-        val kb = bytes / 1024.0
-        if (kb < 1024) return String.format("%.1f KB", kb)
-        val mb = kb / 1024.0
-        return String.format("%.1f MB", mb)
     }
 }

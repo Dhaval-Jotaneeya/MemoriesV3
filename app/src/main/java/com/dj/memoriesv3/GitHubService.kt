@@ -1,5 +1,6 @@
 package com.dj.memoriesv3
 
+import com.google.gson.annotations.SerializedName
 import okhttp3.RequestBody
 import retrofit2.Response
 import retrofit2.http.Body
@@ -100,4 +101,107 @@ interface GitHubService {
         @Header("Authorization") token: String,
         @Body body: RequestBody
     ): Response<Any>
+
+    // ── Git Data API (for batch uploads) ──
+
+    /**
+     * Create a git blob. Body: { "content": "base64...", "encoding": "base64" }
+     * Returns: { "sha": "..." }
+     */
+    @POST("repos/{owner}/{repo}/git/blobs")
+    suspend fun createBlob(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Header("Authorization") token: String,
+        @Body body: RequestBody
+    ): Response<GitBlobResponse>
+
+    /**
+     * Get a git ref (e.g., heads/main).
+     * Returns: { "object": { "sha": "..." } }
+     */
+    @GET("repos/{owner}/{repo}/git/ref/{ref}")
+    suspend fun getRef(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("ref", encoded = true) ref: String,
+        @Header("Authorization") token: String
+    ): Response<GitRefResponse>
+
+    /**
+     * Update a git ref. Body: { "sha": "..." }
+     */
+    @PATCH("repos/{owner}/{repo}/git/refs/{ref}")
+    suspend fun updateRef(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("ref", encoded = true) ref: String,
+        @Header("Authorization") token: String,
+        @Body body: RequestBody
+    ): Response<Any>
+
+    /**
+     * Get a git commit to retrieve its tree SHA.
+     */
+    @GET("repos/{owner}/{repo}/git/commits/{sha}")
+    suspend fun getCommit(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Path("sha") sha: String,
+        @Header("Authorization") token: String
+    ): Response<GitCommitResponse>
+
+    /**
+     * Create a git tree. Body: { "base_tree": "...", "tree": [...] }
+     * Returns: { "sha": "..." }
+     */
+    @POST("repos/{owner}/{repo}/git/trees")
+    suspend fun createTree(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Header("Authorization") token: String,
+        @Body body: RequestBody
+    ): Response<GitTreeCreateResponse>
+
+    /**
+     * Create a git commit. Body: { "message": "...", "tree": "...", "parents": ["..."] }
+     */
+    @POST("repos/{owner}/{repo}/git/commits")
+    suspend fun createCommit(
+        @Path("owner") owner: String,
+        @Path("repo") repo: String,
+        @Header("Authorization") token: String,
+        @Body body: RequestBody
+    ): Response<GitCommitCreateResponse>
 }
+
+// ── Response models for Git Data API ──
+
+data class GitBlobResponse(
+    @SerializedName("sha") val sha: String
+)
+
+data class GitRefResponse(
+    @SerializedName("object") val obj: GitRefObject
+)
+
+data class GitRefObject(
+    @SerializedName("sha") val sha: String
+)
+
+data class GitCommitResponse(
+    @SerializedName("sha") val sha: String,
+    @SerializedName("tree") val tree: GitCommitTree
+)
+
+data class GitCommitTree(
+    @SerializedName("sha") val sha: String
+)
+
+data class GitTreeCreateResponse(
+    @SerializedName("sha") val sha: String
+)
+
+data class GitCommitCreateResponse(
+    @SerializedName("sha") val sha: String
+)

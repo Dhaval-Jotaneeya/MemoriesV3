@@ -1,18 +1,30 @@
 package com.dj.memoriesv3
 
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.util.concurrent.TimeUnit
 
 object GitHubRepository {
 
     private const val BASE_URL = "https://api.github.com/"
 
+    private val httpClient: OkHttpClient by lazy {
+        OkHttpClient.Builder()
+            .connectTimeout(60, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(120, TimeUnit.SECONDS)
+            .build()
+    }
+
     private val service: GitHubService by lazy {
         Retrofit.Builder()
             .baseUrl(BASE_URL)
+            .client(httpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(GitHubService::class.java)
@@ -161,6 +173,213 @@ object GitHubRepository {
         val body = json.toString().toRequestBody("application/json".toMediaType())
         val response = service.deleteFile(owner, repo, filePath, "Bearer $token", body)
         return response.isSuccessful
+    }
+    // ── Batch Upload via Git Data API (single commit for all files) ──
+
+    /**
+     * Data class for a file to be included in a batch upload.
+     */
+    data class BatchFile(
+        val repoPath: String,    // e.g. "photo.jpg" or "thumbnails/photo.jpg"
+        val base64Content: String
+    )
+
+    /**
+     * Create a git blob and return its SHA.
+     */
+    /**
+     * Create a git blob and return its SHA.
+     */
+    suspend fun createBlob(
+        owner: String, repo: String, token: String, base64Content: String
+    ): String {
+        val json = JSONObject().apply {
+            put("content", base64Content)
+            put("encoding", "base64")
+        }
+        val body = json.toString().toRequestBody("application/json".toMediaType())
+        val response = service.createBlob(owner, repo, "Bearer $token", body)
+        if (!response.isSuccessful) {
+            throw Exception("Failed to create blob: ${response.code()} ${response.errorBody()?.string()}")
+        }
+        return response.body()?.sha ?: throw Exception("Blob response missing SHA")
+    }
+
+    /**
+     * Get the SHA of the HEAD of a branch.
+     */
+    suspend fun getBranchSha(owner: String, repo: String, token: String, branch: String): String {
+        val response = service.getRef(owner, repo, "heads/$branch", "Bearer $token")
+        if (!response.isSuccessful) {
+            throw Exception("Failed to get ref heads/$branch: ${response.code()}")
+        }
+        return response.body()?.obj?.sha ?: throw Exception("Ref response missing SHA")
+    }
+
+    /**
+     * Get the base tree SHA for a commit.
+     */
+    suspend fun getBaseTreeSha(owner: String, repo: String, token: String, commitSha: String): String {
+        val response = service.getCommit(owner, repo, commitSha, "Bearer $token")
+        if (!response.isSuccessful) {
+            throw Exception("Failed to get commit: ${response.code()}")
+        }
+        return response.body()?.tree?.sha ?: throw Exception("Commit response missing tree SHA")
+    }
+
+    /**
+     * Create a new tree with the given items.
+     */
+    suspend fun createTree(
+        owner: String, repo: String, token: String,
+        baseTreeSha: String, treeItems: List<JSONObject>
+    ): String {
+        val treeArray = JSONArray()
+        treeItems.forEach { treeArray.put(it) }
+        val json = JSONObject().apply {
+            put("base_tree", baseTreeSha)
+            put("tree", treeArray)
+        }
+        val body = json.toString().toRequestBody("application/json".toMediaType())
+        val response = service.createTree(owner, repo, "Bearer $token", body)
+        if (!response.isSuccessful) {
+            throw Exception("Failed to create tree: ${response.code()} ${response.errorBody()?.string()}")
+        }
+        return response.body()?.sha ?: throw Exception("Tree response missing SHA")
+    }
+
+    /**
+     * Create a commit pointing to a tree.
+     */
+    suspend fun createCommitObj(
+        owner: String, repo: String, token: String,
+        message: String, treeSha: String, parentSha: String
+    ): String {
+        val parentsArray = JSONArray().apply { put(parentSha) }
+        val json = JSONObject().apply {
+            put("message", message)
+            put("tree", treeSha)
+            put("parents", parentsArray)
+        }
+        val body = json.toString().toRequestBody("application/json".toMediaType())
+        val response = service.createCommit(owner, repo, "Bearer $token", body)
+        if (!response.isSuccessful) {
+            throw Exception("Failed to create commit: ${response.code()} ${response.errorBody()?.string()}")
+        }
+        return response.body()?.sha ?: throw Exception("Commit response missing SHA")
+    }
+
+    /**
+     * Update a branch ref to point to a new commit.
+     */
+    suspend fun updateRef(
+        owner: String, repo: String, token: String,
+        branch: String, commitSha: String
+    ) {
+        val json = JSONObject().apply {
+            put("sha", commitSha)
+        }
+        val body = json.toString().toRequestBody("application/json".toMediaType())
+        val response = service.updateRef(owner, repo, "heads/$branch", "Bearer $token", body)
+        if (!response.isSuccessful) {
+            throw Exception("Failed to update ref: ${response.code()} ${response.errorBody()?.string()}")
+        }
+    }
+
+    /**
+     * Resolve the default branch name (tries 'main', falls back to 'master').
+     * Returns a Pair of (headSha, branchName).
+     */
+    suspend fun resolveDefaultBranch(owner: String, repo: String, token: String): Pair<String, String> {
+        return try {
+            getBranchSha(owner, repo, token, "main") to "main"
+        } catch (_: Exception) {
+            getBranchSha(owner, repo, token, "master") to "master"
+        }
+    }
+
+    /**
+     * Retry a suspend block with exponential backoff.
+     * @param maxRetries Number of retry attempts (default 3).
+     * @param initialDelayMs Initial delay before first retry (default 2000ms).
+     * @param maxDelayMs Maximum delay cap (default 15000ms).
+     */
+    suspend fun <T> retryWithBackoff(
+        maxRetries: Int = 3,
+        initialDelayMs: Long = 2000,
+        maxDelayMs: Long = 15000,
+        block: suspend () -> T
+    ): T {
+        var lastException: Exception? = null
+        var currentDelay = initialDelayMs
+        repeat(maxRetries) { attempt ->
+            try {
+                return block()
+            } catch (e: Exception) {
+                lastException = e
+                if (attempt < maxRetries - 1) {
+                    kotlinx.coroutines.delay(currentDelay)
+                    currentDelay = (currentDelay * 2).coerceAtMost(maxDelayMs)
+                }
+            }
+        }
+        throw lastException ?: Exception("Retry failed")
+    }
+
+    /**
+     * Upload multiple files in a single commit using the Git Data API.
+     *
+     * Steps:
+     * 1. Get HEAD SHA of the branch
+     * 2. Get the base tree SHA
+     * 3. Create blobs for each file (reporting progress via callback)
+     * 4. Create a new tree with all blobs
+     * 5. Create a commit on the new tree
+     * 6. Update the branch ref
+     *
+     * @param onBlobProgress Called after each blob is created: (completedCount, totalCount, fileName)
+     */
+    suspend fun uploadBatch(
+        owner: String,
+        repo: String,
+        token: String,
+        files: List<BatchFile>,
+        commitMessage: String,
+        branch: String = "main",
+        onBlobProgress: ((Int, Int, String) -> Unit)? = null
+    ) {
+        // 1. Get HEAD SHA (try 'main', fallback to 'master')
+        val (headSha, actualBranch) = try {
+            getBranchSha(owner, repo, token, branch) to branch
+        } catch (_: Exception) {
+            getBranchSha(owner, repo, token, "master") to "master"
+        }
+
+        // 2. Get base tree SHA
+        val baseTreeSha = getBaseTreeSha(owner, repo, token, headSha)
+
+        // 3. Create blobs for each file
+        val treeItems = mutableListOf<JSONObject>()
+        for ((index, file) in files.withIndex()) {
+            onBlobProgress?.invoke(index, files.size, file.repoPath)
+            val blobSha = createBlob(owner, repo, token, file.base64Content)
+            treeItems.add(JSONObject().apply {
+                put("path", file.repoPath)
+                put("mode", "100644")
+                put("type", "blob")
+                put("sha", blobSha)
+            })
+        }
+        onBlobProgress?.invoke(files.size, files.size, "")
+
+        // 4. Create tree
+        val newTreeSha = createTree(owner, repo, token, baseTreeSha, treeItems)
+
+        // 5. Create commit
+        val newCommitSha = createCommitObj(owner, repo, token, commitMessage, newTreeSha, headSha)
+
+        // 6. Update ref
+        updateRef(owner, repo, token, actualBranch, newCommitSha)
     }
 }
 
