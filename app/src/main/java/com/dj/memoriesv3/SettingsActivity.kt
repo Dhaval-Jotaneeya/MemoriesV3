@@ -50,6 +50,8 @@ class SettingsActivity : ComponentActivity() {
                 var isCheckingUpdate by remember { mutableStateOf(false) }
                 var updateInfo by remember { mutableStateOf<GitHubRepository.LatestRelease?>(null) }
                 var showUpdateDialog by remember { mutableStateOf(false) }
+                var isDownloadingUpdate by remember { mutableStateOf(false) }
+                var downloadProgress by remember { mutableFloatStateOf(0f) }
 
                 val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
                     rememberTopAppBarState()
@@ -528,20 +530,44 @@ class SettingsActivity : ComponentActivity() {
                                                 overflow = TextOverflow.Ellipsis
                                             )
                                         }
+                                        
+                                        if (isDownloadingUpdate) {
+                                            Spacer(Modifier.height(16.dp))
+                                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                LinearProgressIndicator(
+                                                    progress = { downloadProgress },
+                                                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
+                                                )
+                                                Spacer(Modifier.height(4.dp))
+                                                Text(
+                                                    "Downloading: ${(downloadProgress * 100).toInt()}%",
+                                                    style = MaterialTheme.typography.labelSmall
+                                                )
+                                            }
+                                        }
                                     }
                                 },
                                 confirmButton = {
                                     Button(
                                         onClick = {
-                                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(updateInfo?.downloadUrl))
-                                            startActivity(intent)
-                                            showUpdateDialog = false
+                                            if (!isDownloadingUpdate) {
+                                                isDownloadingUpdate = true
+                                                downloadAndInstallApk(updateInfo?.downloadUrl ?: "") { progress ->
+                                                    downloadProgress = progress
+                                                }
+                                            }
                                         },
+                                        enabled = !isDownloadingUpdate,
                                         shape = RoundedCornerShape(12.dp),
-                                    ) { Text("Download APK") }
+                                    ) { 
+                                        if (isDownloadingUpdate) Text("Downloading...") else Text("Update Now") 
+                                    }
                                 },
                                 dismissButton = {
-                                    TextButton(onClick = { showUpdateDialog = false }) { Text("Later") }
+                                    TextButton(
+                                        onClick = { showUpdateDialog = false },
+                                        enabled = !isDownloadingUpdate
+                                    ) { Text("Later") }
                                 },
                             )
                         }
@@ -713,4 +739,65 @@ class SettingsActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun downloadAndInstallApk(url: String, onProgress: (Float) -> Unit) {
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val client = okhttp3.OkHttpClient()
+                val request = okhttp3.Request.Builder().url(url).build()
+                val response = client.newCall(request).execute()
+                
+                if (!response.isSuccessful) throw Exception("Failed to download file")
+                
+                val body = response.body ?: throw Exception("Empty response body")
+                val totalBytes = body.contentLength()
+                val file = java.io.File(cacheDir, "update.apk")
+                
+                body.byteStream().use { input ->
+                    java.io.FileOutputStream(file).use { output ->
+                        val buffer = ByteArray(8192)
+                        var bytesRead: Int
+                        var totalRead = 0L
+                        
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            if (totalBytes > 0) {
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    onProgress(totalRead.toFloat() / totalBytes)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    installApk(file)
+                }
+            } catch (e: Exception) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(this@SettingsActivity, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun installApk(file: java.io.File) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this,
+                "${packageName}.provider",
+                file
+            )
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "application/vnd.android.package-archive")
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Failed to start installer: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+}
 }
