@@ -85,7 +85,10 @@ class GalleryViewModel : ViewModel() {
                 // Step 1: Get Root Tree
                 val rootTree = GitHubRepository.getRepoTree(organization, repoName, "HEAD", token, 0)
                 val rootItems = rootTree.tree
-                val thumbDir = rootItems.find { it.path.equals("thumbnails", ignoreCase = true) && it.type == "tree" }
+                val thumbDir = rootItems.find { 
+                    (it.path.equals("thumbnails", ignoreCase = true) || it.path.equals("thumbnail", ignoreCase = true)) 
+                    && it.type == "tree" 
+                }
 
                 if (thumbDir == null) {
                     _imagesState.value = UiState.Success(emptyList())

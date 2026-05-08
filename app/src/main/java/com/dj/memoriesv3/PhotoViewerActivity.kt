@@ -336,7 +336,7 @@ class PhotoViewerActivity : ComponentActivity() {
         downloadingPages.add(index)
         val file = photoList[index]
         val fileName = file.name
-        val filePath = file.originalPath ?: file.path.replaceFirst(Regex("^thumbnails/", RegexOption.IGNORE_CASE), "")
+        val filePath = file.originalPath ?: file.path.replaceFirst(Regex("^(thumbnails|thumbnail)/", RegexOption.IGNORE_CASE), "")
         val encodedPath = filePath.split('/').joinToString("/") { android.net.Uri.encode(it) }
 
         val originalUrl = if (token.isNotEmpty()) {
