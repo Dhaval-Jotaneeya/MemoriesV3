@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import com.dj.memoriesv3.ui.theme.MemoriesTheme
@@ -498,6 +499,53 @@ class SettingsActivity : ComponentActivity() {
                             )
                         }
 
+                        if (showUpdateDialog && updateInfo != null) {
+                            AlertDialog(
+                                onDismissRequest = { showUpdateDialog = false },
+                                shape = RoundedCornerShape(24.dp),
+                                icon = {
+                                    Icon(
+                                        Icons.Outlined.SystemUpdate,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                    )
+                                },
+                                title = { Text("New Update Available") },
+                                text = {
+                                    Column {
+                                        Text("Version ${updateInfo?.tagName} is available.")
+                                        if (updateInfo?.releaseNotes?.isNotEmpty() == true) {
+                                            Spacer(Modifier.height(8.dp))
+                                            Text(
+                                                "Release Notes:",
+                                                fontWeight = FontWeight.Bold,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                            Text(
+                                                updateInfo?.releaseNotes ?: "",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 5,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                        }
+                                    }
+                                },
+                                confirmButton = {
+                                    Button(
+                                        onClick = {
+                                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(updateInfo?.downloadUrl))
+                                            startActivity(intent)
+                                            showUpdateDialog = false
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                    ) { Text("Download APK") }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showUpdateDialog = false }) { Text("Later") }
+                                },
+                            )
+                        }
+
                         Spacer(Modifier.height(32.dp))
 
                         // ── About Section ──
@@ -534,10 +582,56 @@ class SettingsActivity : ComponentActivity() {
                                             color = MaterialTheme.colorScheme.onSurface,
                                         )
                                         Text(
-                                            "Version 3.0",
+                                            "Version ${BuildConfig.VERSION_NAME}",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         )
+                                    }
+                                }
+                                Spacer(Modifier.height(16.dp))
+                                
+                                // Check for Updates Button
+                                Button(
+                                    onClick = {
+                                        isCheckingUpdate = true
+                                        lifecycleScope.launch {
+                                            val info = GitHubRepository.getLatestReleaseInfo()
+                                            isCheckingUpdate = false
+                                            if (info != null) {
+                                                // Compare versions. Simple string comparison for now, 
+                                                // or more advanced logic if needed.
+                                                if (info.tagName != BuildConfig.VERSION_NAME && 
+                                                    info.tagName != "v${BuildConfig.VERSION_NAME}") {
+                                                    updateInfo = info
+                                                    showUpdateDialog = true
+                                                } else {
+                                                    Toast.makeText(this@SettingsActivity, "You are on the latest version!", Toast.LENGTH_SHORT).show()
+                                                }
+                                            } else {
+                                                Toast.makeText(this@SettingsActivity, "Failed to check for updates", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = !isCheckingUpdate,
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                ) {
+                                    if (isCheckingUpdate) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(18.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Checking...")
+                                    } else {
+                                        Icon(Icons.Outlined.Update, contentDescription = null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Check for Updates")
                                     }
                                 }
                                 Spacer(Modifier.height(12.dp))
