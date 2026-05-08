@@ -7,6 +7,10 @@ android {
     namespace = "com.dj.memoriesv3"
     compileSdk = 36
 
+    base {
+        archivesName.set("MemoriesV3")
+    }
+
     defaultConfig {
         applicationId = "com.dj.memoriesv3"
         minSdk = 24
@@ -34,6 +38,8 @@ android {
         viewBinding = true
         compose = true
     }
+
+
 }
 
 dependencies {

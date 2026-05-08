@@ -2,6 +2,7 @@ package com.dj.memoriesv3
 
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
@@ -10,6 +11,12 @@ import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
 object GitHubRepository {
+
+    data class LatestRelease(
+        val tagName: String,
+        val downloadUrl: String,
+        val releaseNotes: String
+    )
 
     private const val BASE_URL = "https://api.github.com/"
 
@@ -28,6 +35,44 @@ object GitHubRepository {
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(GitHubService::class.java)
+    }
+
+    /**
+     * Fetches the latest release info for the app from the public repository.
+     */
+    suspend fun getLatestReleaseInfo(): LatestRelease? {
+        return kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val request = Request.Builder()
+                    .url("${BASE_URL}repos/Dhaval-Jotaneeya/MemoriesV3/releases/latest")
+                    .get()
+                    .build()
+
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) return@withContext null
+                    
+                    val json = JSONObject(response.body?.string() ?: "")
+                    val tagName = json.getString("tag_name")
+                    val body = json.optString("body", "")
+                    
+                    // Find the first .apk asset
+                    val assets = json.getJSONArray("assets")
+                    var apkUrl = ""
+                    for (i in 0 until assets.length()) {
+                        val asset = assets.getJSONObject(i)
+                        val name = asset.getString("name")
+                        if (name.endsWith(".apk", ignoreCase = true)) {
+                            apkUrl = asset.getString("browser_download_url")
+                            break
+                        }
+                    }
+                    
+                    if (apkUrl.isNotEmpty()) LatestRelease(tagName, apkUrl, body) else null
+                }
+            } catch (e: Exception) {
+                null
+            }
+        }
     }
 
     suspend fun getOrgRepos(org: String, token: String, page: Int): List<GitHubRepo> {

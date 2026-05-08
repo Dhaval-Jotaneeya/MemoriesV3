@@ -27,6 +27,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 import com.dj.memoriesv3.ui.theme.MemoriesTheme
 
 class SettingsActivity : ComponentActivity() {
@@ -37,13 +39,16 @@ class SettingsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val sharedPreferences = getSharedPreferences(Constants.PREFS_NAME, Context.MODE_PRIVATE)
-
         setContent {
             MemoriesTheme {
                 var orgName by remember { mutableStateOf(sharedPreferences.getString(Constants.KEY_ORG_NAME, "") ?: "") }
                 var token by remember { mutableStateOf(sharedPreferences.getString(Constants.KEY_GITHUB_TOKEN, "") ?: "") }
                 var tokenVisible by remember { mutableStateOf(false) }
                 var saveSuccess by remember { mutableStateOf(false) }
+                
+                var isCheckingUpdate by remember { mutableStateOf(false) }
+                var updateInfo by remember { mutableStateOf<GitHubRepository.LatestRelease?>(null) }
+                var showUpdateDialog by remember { mutableStateOf(false) }
 
                 val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(
                     rememberTopAppBarState()
