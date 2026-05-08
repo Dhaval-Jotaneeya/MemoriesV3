@@ -191,14 +191,12 @@ class MainActivity : ComponentActivity() {
                         ),
                     )
                 } else {
-                    LargeTopAppBar(
+                    TopAppBar(
                         title = {
-                            Column {
-                                Text(
-                                    "Memories",
-                                    fontWeight = FontWeight.Bold,
-                                )
-                            }
+                            Text(
+                                "Memories",
+                                fontWeight = FontWeight.Bold,
+                            )
                         },
                         actions = {
                             // Refresh button with rotation animation
@@ -235,7 +233,7 @@ class MainActivity : ComponentActivity() {
                             }
                         },
                         scrollBehavior = scrollBehavior,
-                        colors = TopAppBarDefaults.largeTopAppBarColors(
+                        colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = MaterialTheme.colorScheme.surface,
                             scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
                             titleContentColor = MaterialTheme.colorScheme.onSurface,
